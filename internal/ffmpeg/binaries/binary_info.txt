@@ -1,0 +1,3 @@
+platform=macos
+arch=arm64
+timestamp=Thu May 15 21:34:30 IST 2025

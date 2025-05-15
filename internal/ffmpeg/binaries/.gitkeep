@@ -1,0 +1,2 @@
+// This file ensures the binaries directory exists for go:embed
+// Delete this file once actual binaries are downloaded 
