@@ -64,6 +64,17 @@ jobs:
         with:
           myToken: ${{ secrets.GITHUB_TOKEN }}
           fetch: true
+        continue-on-error: true
+
+      - name: Set empty changelog if generator failed
+        if: steps.changelog.outcome != 'success'
+        run: |
+          echo "CHANGELOG=Initial release" >> $GITHUB_ENV
+          
+      - name: Set changelog env variable if successful
+        if: steps.changelog.outcome == 'success'
+        run: |
+          echo "CHANGELOG=${{ steps.changelog.outputs.changelog }}" >> $GITHUB_ENV
 
       - name: Create new tag
         run: |
