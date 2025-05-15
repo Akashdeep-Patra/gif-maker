@@ -10,6 +10,9 @@ VERSION=$(shell git describe --tags --always --dirty 2>/dev/null || echo "dev")
 BUILD_DIR=./build
 LDFLAGS=-ldflags "-X github.com/Akashdeep-Patra/gif-maker/cmd.Version=$(VERSION)"
 FFMPEG_DIR=internal/ffmpeg/binaries
+TEST_VIDEO=video.mp4
+TEST_SCRIPT=scripts/test-with-video.sh
+INVALID_TEST_SCRIPT=scripts/test-with-invalid-file.sh
 
 # Colors for terminal output
 BLUE=\033[0;34m
@@ -18,7 +21,7 @@ YELLOW=\033[0;33m
 RED=\033[0;31m
 NC=\033[0m # No Color
 
-.PHONY: all build clean test lint fmt vet install check help
+.PHONY: all build clean test lint fmt vet install check help build-and-test
 
 # Default target
 all: check build
@@ -93,6 +96,15 @@ release: build
 	@cd $(BUILD_DIR) && tar -czf $(BINARY_NAME)-$(VERSION).tar.gz release
 	@echo "${GREEN}Release package created: $(BUILD_DIR)/$(BINARY_NAME)-$(VERSION).tar.gz${NC}"
 
+# Build and test with valid and invalid files
+build-and-test: build
+	@echo "${BLUE}Running all tests for $(BINARY_NAME)...${NC}"
+	@echo "${BLUE}=== Testing with valid video file ===${NC}"
+	@./$(TEST_SCRIPT) $(TEST_VIDEO) || { echo "${RED}Video test failed${NC}"; exit 1; }
+	@echo "${BLUE}=== Testing with invalid file format ===${NC}"
+	@./$(INVALID_TEST_SCRIPT) || { echo "${RED}Invalid file test failed${NC}"; exit 1; }
+	@echo "${GREEN}\033[1mAll tests passed!${NC}"
+
 # Help target
 help:
 	@echo "${BLUE}GIF-Maker Makefile Help${NC}"
@@ -107,6 +119,7 @@ help:
 	@echo "  ${GREEN}make run${NC}           - Run the application"
 	@echo "  ${GREEN}make check${NC}         - Check dependencies"
 	@echo "  ${GREEN}make release${NC}       - Create a basic release package"
+	@echo "  ${GREEN}make build-and-test${NC} - Build and test with both valid and invalid files"
 	@echo "  ${GREEN}make help${NC}          - Show this help message"
 
 # Default to help if no target is specified

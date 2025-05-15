@@ -38,6 +38,20 @@ type ConvertOptions struct {
 
 var opts ConvertOptions
 
+// List of valid video extensions
+var validVideoExtensions = []string{".mp4", ".avi", ".mov", ".mkv", ".webm"}
+
+// isValidVideoFile checks if the file has a valid video extension
+func isValidVideoFile(filePath string) bool {
+	ext := strings.ToLower(filepath.Ext(filePath))
+	for _, validExt := range validVideoExtensions {
+		if ext == validExt {
+			return true
+		}
+	}
+	return false
+}
+
 var convertCmd = &cobra.Command{
 	Use:   "convert",
 	Short: "Convert a video file to a GIF",
@@ -66,6 +80,11 @@ If no arguments are provided, interactive mode is enabled by default.`,
 		// Validate input file exists
 		if _, err := os.Stat(opts.Input); os.IsNotExist(err) {
 			return fmt.Errorf("input file does not exist: %s", opts.Input)
+		}
+
+		// Validate input file has a valid video extension
+		if !isValidVideoFile(opts.Input) {
+			return fmt.Errorf("input file must be a valid video format (mp4, avi, mov, mkv, webm): %s", opts.Input)
 		}
 
 		// Set default output if not provided
@@ -243,6 +262,11 @@ func promptForOptions() error {
 	// Check if input file exists
 	if _, err := os.Stat(opts.Input); os.IsNotExist(err) {
 		return fmt.Errorf("input file does not exist: %s", opts.Input)
+	}
+
+	// Validate input file has a valid video extension
+	if !isValidVideoFile(opts.Input) {
+		return fmt.Errorf("input file must be a valid video format (mp4, avi, mov, mkv, webm): %s", opts.Input)
 	}
 
 	// Output file prompt
