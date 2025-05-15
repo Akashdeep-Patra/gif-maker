@@ -8,6 +8,9 @@ on:
     branches:
       - main
 
+permissions:
+  contents: write
+
 jobs:
   auto-version:
     runs-on: ubuntu-latest
@@ -16,7 +19,7 @@ jobs:
       new_tag: ${{ steps.new_version.outputs.new_tag }}
     steps:
       - name: Checkout
-        uses: actions/checkout@v3
+        uses: actions/checkout@v4
         with:
           fetch-depth: 0
           token: ${{ secrets.GITHUB_TOKEN }}
@@ -60,6 +63,7 @@ jobs:
         uses: metcalfc/changelog-generator@v4.6.2
         with:
           myToken: ${{ secrets.GITHUB_TOKEN }}
+          fetch: true
 
       - name: Create new tag
         run: |
