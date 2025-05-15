@@ -45,3 +45,15 @@ changelog:
       - '^ci:'
       - Merge pull request
       - Merge branch 
+
+brews:
+  - name: gif-maker
+    homepage: https://github.com/Akashdeep-Patra/gif-maker
+    description: "A CLI tool for converting video files to GIFs"
+    repository:
+      owner: Akashdeep-Patra
+      name: homebrew-tap
+      token: "{{ .Env.HOMEBREW_TAP_GITHUB_TOKEN }}"
+    commit_author:
+      name: goreleaserbot
+      email: goreleaser@example.com
