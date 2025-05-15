@@ -37,3 +37,7 @@ coverage.txt
 # Local environment files
 .env
 .env.local 
+
+# Media files
+video.mp4
+test.gif 
