@@ -24,6 +24,22 @@ If FFmpeg is not installed, the tool will attempt to use embedded binaries (if a
 
 ## Installation
 
+### Using Homebrew
+
+```bash
+# Add the tap
+brew tap Akashdeep-Patra/tap
+
+# Install the tool
+brew install gif-maker
+```
+
+Or in a single command:
+
+```bash
+brew install Akashdeep-Patra/tap/gif-maker
+```
+
 ### From Source
 
 ```bash
@@ -204,6 +220,10 @@ The file picker provides:
 │   └── ffmpeg/           # FFmpeg management
 │       ├── ffmpeg.go     # FFmpeg binary handling
 │       └── binaries/     # Embedded FFmpeg binaries
+├── .goreleaser.yml       # GoReleaser configuration for automated releases
+├── .github/workflows/    # GitHub Actions workflows
+│   ├── release.yml       # Release automation with Homebrew tap updates
+│   └── test.yml          # Automated testing
 ├── go.mod                # Go module definition
 ├── go.sum                # Go module checksums
 └── main.go               # Application entry point
@@ -300,6 +320,57 @@ Use the `--verbose` flag to enable detailed logging for troubleshooting.
 ## Contributing
 
 Contributions are welcome! Please feel free to submit a Pull Request.
+
+## Release and Deployment Setup
+
+This project uses GitHub Actions and GoReleaser for automated releases and distribution.
+
+### Automated Releases
+
+When a new tag is pushed or a release is created on GitHub, the following happens automatically:
+
+1. The release workflow is triggered
+2. Tests are run to ensure code quality
+3. GoReleaser builds binaries for multiple platforms (macOS, Windows, Linux)
+4. Release assets are uploaded to the GitHub release page
+5. The Homebrew tap formula is updated
+
+### Homebrew Integration Setup
+
+To set up Homebrew tap integration for your fork of this project:
+
+1. Create a new public repository named `homebrew-tap` in your GitHub account
+2. Generate a Personal Access Token (PAT) with `repo` scope
+3. Add the token as a secret named `HOMEBREW_TAP_GITHUB_TOKEN` in your gif-maker repository
+4. Ensure the `.goreleaser.yml` file contains the Homebrew tap configuration:
+
+```yaml
+brews:
+  - name: gif-maker
+    homepage: https://github.com/YourUsername/gif-maker
+    description: "A CLI tool for converting video files to GIFs"
+    repository:
+      owner: YourUsername
+      name: homebrew-tap
+      token: "{{ .Env.HOMEBREW_TAP_GITHUB_TOKEN }}"
+    commit_author:
+      name: goreleaserbot
+      email: goreleaser@example.com
+```
+
+5. Update the GitHub workflow file (`.github/workflows/release.yml`) to include the token:
+
+```yaml
+env:
+  GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+  HOMEBREW_TAP_GITHUB_TOKEN: ${{ secrets.HOMEBREW_TAP_GITHUB_TOKEN }}
+```
+
+This setup allows users to install your tool via Homebrew using:
+
+```bash
+brew install YourUsername/tap/gif-maker
+```
 
 ## License
 
