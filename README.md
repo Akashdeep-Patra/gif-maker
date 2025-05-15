@@ -40,6 +40,24 @@ Or in a single command:
 brew install Akashdeep-Patra/tap/gif-maker
 ```
 
+### Updating with Homebrew
+
+To update to the latest version of gif-maker:
+
+```bash
+# Update Homebrew first
+brew update
+
+# Then upgrade gif-maker
+brew upgrade gif-maker
+```
+
+You can check your current version with:
+
+```bash
+gif-maker version
+```
+
 ### From Source
 
 ```bash

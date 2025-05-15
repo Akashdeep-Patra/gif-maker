@@ -9,6 +9,7 @@ dist/
 *.dylib
 *.test
 *.out
+build
 
 # IDE and editor files
 .idea/
