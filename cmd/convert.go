@@ -18,7 +18,8 @@ import (
 	"github.com/AlecAivazis/survey/v2"
 	"github.com/fatih/color"
 	"github.com/spf13/cobra"
-	"golang.org/x/term"
+	"github.com/vbauerster/mpb/v7"
+	"github.com/vbauerster/mpb/v7/decor"
 
 	"github.com/Akashdeep-Patra/gif-maker/internal/ffmpeg"
 )
@@ -461,8 +462,26 @@ func convertVideo() error {
 		Closer: stderr,
 	}
 
-	// Create a channel to receive progress updates
-	progressChan := make(chan ProgressUpdate, 10)
+	// Create progress data
+	progress := &ProgressData{
+		StartTime:      time.Now(),
+		ProcessingRate: 1.0,
+	}
+
+	// Find the total duration from the input file
+	totalDuration, videoDimensions, err := getVideoMetadata(opts.Input, ffmpegPath)
+	if err != nil {
+		logger.Warnf("Could not get video metadata: %v", err)
+	}
+
+	if videoDimensions[0] > 0 && videoDimensions[1] > 0 {
+		progress.Width = videoDimensions[0]
+		progress.Height = videoDimensions[1]
+	}
+
+	if totalDuration > 0 {
+		progress.TotalDuration = totalDuration
+	}
 
 	// Start the command
 	startTime := time.Now()
@@ -470,11 +489,9 @@ func convertVideo() error {
 		return fmt.Errorf("failed to start FFmpeg: %w", err)
 	}
 
-	// Track progress in a separate goroutine
-	var finalProgress *ProgressData
-
 	if !opts.NoProgress {
-		finalProgress = runProgressTracking(stdout, progressChan, startTime)
+		// Create and start the progress tracking
+		runMPBProgressTracking(stdout, progress, totalDuration)
 	} else {
 		go trackProgress(teeStderr)
 	}
@@ -487,12 +504,6 @@ func convertVideo() error {
 		}
 		return fmt.Errorf("FFmpeg conversion failed: %w\nLast error output: %s", err, errMsg)
 	}
-
-	// Close the progress channel to signal completion
-	close(progressChan)
-
-	// Wait for the progress bar to finish updating
-	time.Sleep(300 * time.Millisecond)
 
 	elapsedTime := time.Since(startTime).Seconds()
 
@@ -513,16 +524,246 @@ func convertVideo() error {
 	fmt.Println("┌─" + strings.Repeat("─", 50) + "┐")
 	fmt.Printf("│ %-20s %-28s │\n", color.New(color.FgHiCyan).Sprint(" Output:"), opts.Output)
 	fmt.Printf("│ %-20s %-28s │\n", color.New(color.FgHiCyan).Sprint(" Size:"), fmt.Sprintf("%.2f MB", fileSizeMB))
-	fmt.Printf("│ %-20s %-28s │\n", color.New(color.FgHiCyan).Sprint(" Dimensions:"), fmt.Sprintf("%dx%d", finalProgress.Width, finalProgress.Height))
-	fmt.Printf("│ %-20s %-28s │\n", color.New(color.FgHiCyan).Sprint(" Frames:"), fmt.Sprintf("%d frames at %d fps", finalProgress.Frames, opts.FPS))
+	fmt.Printf("│ %-20s %-28s │\n", color.New(color.FgHiCyan).Sprint(" Dimensions:"), fmt.Sprintf("%dx%d", progress.Width, progress.Height))
+	fmt.Printf("│ %-20s %-28s │\n", color.New(color.FgHiCyan).Sprint(" Frames:"), fmt.Sprintf("%d frames at %d fps", progress.Frames, opts.FPS))
 	fmt.Printf("│ %-20s %-28s │\n", color.New(color.FgHiCyan).Sprint(" Conversion time:"), fmt.Sprintf("%.1f seconds", elapsedTime))
-	fmt.Printf("│ %-20s %-28s │\n", color.New(color.FgHiCyan).Sprint(" Processing rate:"), fmt.Sprintf("%.2fx real-time", finalProgress.AvgProcessRate))
+	fmt.Printf("│ %-20s %-28s │\n", color.New(color.FgHiCyan).Sprint(" Processing rate:"), fmt.Sprintf("%.2fx real-time", progress.AvgProcessRate))
 	fmt.Println("└─" + strings.Repeat("─", 50) + "┘")
 
 	logger.Infof("Conversion completed: %s (%.2f MB) in %.1f seconds",
 		opts.Output, fileSizeMB, elapsedTime)
 
 	return nil
+}
+
+// Get video metadata (duration and dimensions) using FFmpeg
+func getVideoMetadata(videoPath, ffmpegPath string) (float64, [2]int, error) {
+	// Run ffmpeg -i input.mp4 command to get metadata
+	cmd := exec.Command(ffmpegPath, "-i", videoPath)
+	var out strings.Builder
+	cmd.Stderr = &out
+	cmd.Run() // We expect this to "fail" but give us info in stderr
+
+	output := out.String()
+
+	// Extract duration
+	durationRegex := regexp.MustCompile(`Duration: (\d{2}):(\d{2}):(\d{2})\.(\d{2})`)
+	durationMatches := durationRegex.FindStringSubmatch(output)
+
+	var duration float64
+	if len(durationMatches) >= 5 {
+		hours, _ := strconv.Atoi(durationMatches[1])
+		minutes, _ := strconv.Atoi(durationMatches[2])
+		seconds, _ := strconv.Atoi(durationMatches[3])
+		milliseconds, _ := strconv.Atoi(durationMatches[4])
+
+		duration = float64(hours)*3600 + float64(minutes)*60 + float64(seconds) + float64(milliseconds)/100.0
+	}
+
+	// Extract video dimensions
+	dimensionRegex := regexp.MustCompile(`Stream #.*Video:.* (\d+)x(\d+)`)
+	dimensionMatches := dimensionRegex.FindStringSubmatch(output)
+
+	var dimensions [2]int
+	if len(dimensionMatches) >= 3 {
+		dimensions[0], _ = strconv.Atoi(dimensionMatches[1])
+		dimensions[1], _ = strconv.Atoi(dimensionMatches[2])
+	}
+
+	return duration, dimensions, nil
+}
+
+// New progress tracking function using MPB
+func runMPBProgressTracking(r io.ReadCloser, progress *ProgressData, totalDuration float64) {
+	// Create a new MPB progress container
+	p := mpb.New(
+		mpb.WithWidth(80),
+		mpb.WithRefreshRate(100*time.Millisecond),
+	)
+
+	// Create a total bar for overall progress
+	total := int64(totalDuration * 100) // Convert to centiseconds for smoother progress
+	if total <= 0 {
+		total = 100 // Default if we can't determine the duration
+	}
+
+	// Progress bar for encoding
+	bar := p.AddBar(total,
+		mpb.PrependDecorators(
+			decor.Name("Converting: ", decor.WC{W: 12, C: decor.DidentRight}),
+			decor.CountersNoUnit("%d / %d", decor.WCSyncWidth),
+		),
+		mpb.AppendDecorators(
+			decor.Percentage(decor.WC{W: 5}),
+			decor.Name(" • ", decor.WCSyncWidthR),
+			decor.Elapsed(decor.ET_STYLE_GO, decor.WCSyncWidth),
+			decor.Name(" • ", decor.WCSyncWidthR),
+			decor.AverageSpeed(0, "%.1fx", decor.WCSyncWidth),
+		),
+	)
+
+	// Status bar for file info
+	statusBar := p.AddBar(0,
+		mpb.BarFillerClearOnComplete(),
+		mpb.PrependDecorators(
+			decor.Any(func(statistics decor.Statistics) string {
+				if progress.Width > 0 && progress.Height > 0 {
+					return fmt.Sprintf("Size: %s • %dx%d",
+						formatSize(progress.CurrentSize, progress.SizeUnit),
+						progress.Width,
+						progress.Height)
+				}
+				return fmt.Sprintf("Size: %s", formatSize(progress.CurrentSize, progress.SizeUnit))
+			}, decor.WCSyncSpaceR),
+		),
+	)
+
+	// Process frame info
+	frameBar := p.AddBar(0,
+		mpb.BarFillerClearOnComplete(),
+		mpb.PrependDecorators(
+			decor.Any(func(statistics decor.Statistics) string {
+				return fmt.Sprintf("Frames: %d processed", progress.FramesProcessed)
+			}, decor.WCSyncSpaceR),
+		),
+	)
+
+	// Start a goroutine to parse FFmpeg output
+	go func() {
+		defer r.Close()
+
+		// Track average processing rate
+		var speedSum float64
+		var speedCount int
+
+		// Create a scanner with a larger buffer for FFmpeg output
+		scanner := bufio.NewScanner(r)
+		buf := make([]byte, 64*1024)
+		scanner.Buffer(buf, 1024*1024)
+
+		// Progress format patterns
+		timeRegex := regexp.MustCompile(`time=(\d{2}:\d{2}:\d{2}\.\d{2})`)
+		outTimeRegex := regexp.MustCompile(`out_time=(\d{2}:\d{2}:\d{2}\.\d{2})`)
+		outTimeSecondsRegex := regexp.MustCompile(`out_time_ms=(\d+)`)
+		durationRegex := regexp.MustCompile(`Duration: (\d{2}:\d{2}:\d{2}\.\d{2})`)
+		totalDurationSecondsRegex := regexp.MustCompile(`duration=(\d+\.\d+)`)
+		speedRegex := regexp.MustCompile(`speed=(\d+\.\d+)x`)
+		sizeRegex := regexp.MustCompile(`size=\s*(\d+)(\w+)`)
+		frameRegex := regexp.MustCompile(`frame=\s*(\d+)`)
+		dimensionRegex := regexp.MustCompile(`(\d+)x(\d+)`)
+
+		for scanner.Scan() {
+			line := scanner.Text()
+
+			// Track current time
+			if matches := timeRegex.FindStringSubmatch(line); matches != nil {
+				timeStr := matches[1]
+				newTime := timeToSeconds(timeStr)
+				if newTime > 0 {
+					progress.CurrentTime = newTime
+					// Update the progress bar
+					if totalDuration > 0 {
+						bar.SetCurrent(int64(newTime * 100))
+					} else {
+						// If we don't know the total duration, just increment
+						bar.IncrInt64(1)
+					}
+				}
+			} else if matches := outTimeRegex.FindStringSubmatch(line); matches != nil {
+				timeStr := matches[1]
+				newTime := timeToSeconds(timeStr)
+				if newTime > 0 {
+					progress.CurrentTime = newTime
+					if totalDuration > 0 {
+						bar.SetCurrent(int64(newTime * 100))
+					} else {
+						bar.IncrInt64(1)
+					}
+				}
+			} else if matches := outTimeSecondsRegex.FindStringSubmatch(line); matches != nil {
+				ms, err := strconv.ParseInt(matches[1], 10, 64)
+				if err == nil && ms > 0 {
+					progress.CurrentTime = float64(ms) / 1000000.0
+					if totalDuration > 0 {
+						bar.SetCurrent(int64(progress.CurrentTime * 100))
+					} else {
+						bar.IncrInt64(1)
+					}
+				}
+			}
+
+			// Get the duration if we don't have it yet
+			if progress.TotalDuration == 0 {
+				if matches := durationRegex.FindStringSubmatch(line); matches != nil {
+					durationStr := matches[1]
+					progress.TotalDuration = timeToSeconds(durationStr)
+					if progress.TotalDuration > 0 {
+						bar.SetTotal(int64(progress.TotalDuration*100), false)
+					}
+				} else if matches := totalDurationSecondsRegex.FindStringSubmatch(line); matches != nil {
+					duration, err := strconv.ParseFloat(matches[1], 64)
+					if err == nil && duration > 0 {
+						progress.TotalDuration = duration
+						if progress.TotalDuration > 0 {
+							bar.SetTotal(int64(progress.TotalDuration*100), false)
+						}
+					}
+				}
+			}
+
+			// Track encoding speed
+			if matches := speedRegex.FindStringSubmatch(line); matches != nil {
+				s, err := strconv.ParseFloat(matches[1], 64)
+				if err == nil && s > 0 {
+					progress.ProcessingRate = s
+
+					// Track for final summary
+					speedSum += s
+					speedCount++
+					progress.AvgProcessRate = speedSum / float64(speedCount)
+				}
+			}
+
+			// Track current file size
+			if matches := sizeRegex.FindStringSubmatch(line); matches != nil {
+				s, err := strconv.ParseInt(matches[1], 10, 64)
+				if err == nil && s > 0 {
+					progress.CurrentSize = s
+					progress.SizeUnit = matches[2]
+					statusBar.SetTotal(int64(s+1), false)
+					statusBar.SetCurrent(int64(s))
+				}
+			}
+
+			// Track frames processed
+			if matches := frameRegex.FindStringSubmatch(line); matches != nil {
+				f, err := strconv.ParseInt(matches[1], 10, 64)
+				if err == nil && f > 0 {
+					progress.FramesProcessed = f
+					progress.Frames = int(f)
+					frameBar.SetTotal(int64(f+1), false)
+					frameBar.SetCurrent(int64(f))
+				}
+			}
+
+			// Track dimensions
+			if matches := dimensionRegex.FindStringSubmatch(line); matches != nil {
+				w, err1 := strconv.Atoi(matches[1])
+				h, err2 := strconv.Atoi(matches[2])
+				if err1 == nil && err2 == nil && w > 0 && h > 0 {
+					progress.Width = w
+					progress.Height = h
+				}
+			}
+		}
+
+		// Make sure the bars are completed when done
+		if bar.Current() < 100 {
+			bar.SetTotal(bar.Current(), true)
+		}
+		statusBar.SetTotal(statusBar.Current(), true)
+		frameBar.SetTotal(frameBar.Current(), true)
+	}()
 }
 
 // Update the checkFFmpegInstallation function to use the manager
@@ -578,454 +819,6 @@ type ProgressData struct {
 	Height          int
 	AvgProcessRate  float64 // Average processing rate relative to real-time
 	Frames          int
-}
-
-func runProgressTracking(r io.ReadCloser, progressChan chan ProgressUpdate, startTime time.Time) *ProgressData {
-	// Create a new progress data struct to track conversion
-	progress := &ProgressData{
-		StartTime:      startTime,
-		ProcessingRate: 1.0,
-	}
-
-	// Start a goroutine to parse the FFmpeg output
-	go parseFFmpegOutput(r, progressChan)
-
-	// Start a goroutine to display the progress bar
-	go displayProgressBar(progressChan, progress)
-
-	return progress
-}
-
-func parseFFmpegOutput(r io.ReadCloser, progressChan chan ProgressUpdate) {
-	defer r.Close()
-
-	// Create a scanner with a larger buffer for FFmpeg output
-	scanner := bufio.NewScanner(r)
-	// Increase the buffer size to handle longer lines in FFmpeg output
-	buf := make([]byte, 64*1024)
-	scanner.Buffer(buf, 1024*1024)
-
-	// Progress format patterns
-	timeRegex := regexp.MustCompile(`time=(\d{2}:\d{2}:\d{2}\.\d{2})`)
-	outTimeRegex := regexp.MustCompile(`out_time=(\d{2}:\d{2}:\d{2}\.\d{2})`)
-	outTimeSecondsRegex := regexp.MustCompile(`out_time_ms=(\d+)`)
-	durationRegex := regexp.MustCompile(`Duration: (\d{2}:\d{2}:\d{2}\.\d{2})`)
-	totalDurationSecondsRegex := regexp.MustCompile(`duration=(\d+\.\d+)`)
-	speedRegex := regexp.MustCompile(`speed=(\d+\.\d+)x`)
-	sizeRegex := regexp.MustCompile(`size=\s*(\d+)(\w+)`)
-	bitrateRegex := regexp.MustCompile(`bitrate=\s*(\d+\.\d+)(\w+)\/s`)
-	frameRegex := regexp.MustCompile(`frame=\s*(\d+)`)
-	dimensionRegex := regexp.MustCompile(`(\d+)x(\d+)`)
-
-	// Add new regex for progress detection in numeric format
-	progressRegex := regexp.MustCompile(`(\d+\.\d+)%`)
-
-	// Current progress state
-	var update ProgressUpdate
-	var changed bool
-	var lastLogTime time.Time
-
-	for scanner.Scan() {
-		line := scanner.Text()
-		changed = false
-
-		// Debug log to see FFmpeg output (uncomment if needed)
-		// fmt.Println("FFmpeg:", line)
-
-		// Get the duration if we don't have it yet
-		if update.TotalDuration == 0 {
-			if matches := durationRegex.FindStringSubmatch(line); matches != nil {
-				durationStr := matches[1]
-				update.TotalDuration = timeToSeconds(durationStr)
-				changed = true
-			} else if matches := totalDurationSecondsRegex.FindStringSubmatch(line); matches != nil {
-				duration, err := strconv.ParseFloat(matches[1], 64)
-				if err == nil && duration > 0 {
-					update.TotalDuration = duration
-					changed = true
-				}
-			}
-		}
-
-		// Track current time
-		if matches := timeRegex.FindStringSubmatch(line); matches != nil {
-			timeStr := matches[1]
-			newTime := timeToSeconds(timeStr)
-			if newTime > 0 {
-				update.CurrentTime = newTime
-				changed = true
-			}
-		} else if matches := outTimeRegex.FindStringSubmatch(line); matches != nil {
-			timeStr := matches[1]
-			newTime := timeToSeconds(timeStr)
-			if newTime > 0 {
-				update.CurrentTime = newTime
-				changed = true
-			}
-		} else if matches := outTimeSecondsRegex.FindStringSubmatch(line); matches != nil {
-			ms, err := strconv.ParseInt(matches[1], 10, 64)
-			if err == nil && ms > 0 {
-				update.CurrentTime = float64(ms) / 1000000.0
-				changed = true
-			}
-		}
-
-		// Check for percentage progress
-		if matches := progressRegex.FindStringSubmatch(line); matches != nil {
-			progress, err := strconv.ParseFloat(matches[1], 64)
-			if err == nil && progress > 0 && update.TotalDuration > 0 {
-				// If we have the total duration, calculate current time from percentage
-				update.CurrentTime = (progress / 100.0) * update.TotalDuration
-				changed = true
-			}
-		}
-
-		// Track encoding speed
-		if matches := speedRegex.FindStringSubmatch(line); matches != nil {
-			s, err := strconv.ParseFloat(matches[1], 64)
-			if err == nil && s > 0 {
-				update.ProcessingRate = s
-				changed = true
-			}
-		}
-
-		// Track current file size
-		if matches := sizeRegex.FindStringSubmatch(line); matches != nil {
-			s, err := strconv.ParseInt(matches[1], 10, 64)
-			if err == nil && s > 0 {
-				update.CurrentSize = s
-				update.SizeUnit = matches[2]
-				changed = true
-			}
-		}
-
-		// Track bitrate
-		if matches := bitrateRegex.FindStringSubmatch(line); matches != nil {
-			b, err := strconv.ParseFloat(matches[1], 64)
-			if err == nil && b > 0 {
-				update.Bitrate = b
-				update.BitrateUnit = matches[2]
-				changed = true
-			}
-		}
-
-		// Track frames processed
-		if matches := frameRegex.FindStringSubmatch(line); matches != nil {
-			f, err := strconv.ParseInt(matches[1], 10, 64)
-			if err == nil && f > 0 {
-				update.FramesProcessed = f
-				changed = true
-			}
-		}
-
-		// Track dimensions
-		if matches := dimensionRegex.FindStringSubmatch(line); matches != nil {
-			w, err1 := strconv.Atoi(matches[1])
-			h, err2 := strconv.Atoi(matches[2])
-			if err1 == nil && err2 == nil && w > 0 && h > 0 {
-				update.Width = w
-				update.Height = h
-				changed = true
-			}
-		}
-
-		// Send update if values changed or at maximum every 200ms for any activity
-		if changed || (update.FramesProcessed > 0 && time.Since(lastLogTime) > 200*time.Millisecond) {
-			lastLogTime = time.Now()
-			select {
-			case progressChan <- update:
-				// Successfully sent update
-			default:
-				// Channel buffer is full, skip this update
-			}
-		}
-	}
-}
-
-func displayProgressBar(progressChan chan ProgressUpdate, progress *ProgressData) {
-	// Define colors for better visual appeal
-	cyan := color.New(color.FgCyan).SprintFunc()
-	yellow := color.New(color.FgYellow).SprintFunc()
-	green := color.New(color.FgGreen).SprintFunc()
-	blue := color.New(color.FgBlue).SprintFunc()
-	magenta := color.New(color.FgMagenta).SprintFunc()
-	white := color.New(color.FgHiWhite).SprintFunc()
-
-	// Terminal width for adaptive sizing
-	termWidth := 80
-	if width, _, err := term.GetSize(0); err == nil && width > 0 {
-		termWidth = width
-	}
-
-	// Characters for the progress bar
-	const (
-		progressChar  = "█"
-		remainingChar = "░"
-		spinnerChars  = "|/-\\"
-	)
-
-	// Initialize spinner for waiting for duration
-	spinnerIdx := 0
-	spinner := func() string {
-		s := string(spinnerChars[spinnerIdx])
-		spinnerIdx = (spinnerIdx + 1) % len(spinnerChars)
-		return s
-	}
-
-	// Clear the progress line
-	clearLine := func() {
-		fmt.Print("\r\033[K") // Clear the current line
-	}
-
-	// Initialize frame rate tracking
-	frameRates := make([]float64, 0, 20)
-	lastFrameCount := int64(0)
-	lastFrameTime := time.Now()
-
-	// Track frame processing rate to estimate time remaining
-	firstFrameTime := time.Now()
-	firstFrameCount := int64(0)
-	estimatedTotalFrames := int64(0)
-
-	// Display the initial progress bar
-	fmt.Println(cyan("╭─") + strings.Repeat("─", termWidth-4) + cyan("─╮"))
-	fmt.Println(cyan("│") + white(" Converting video to GIF...") + strings.Repeat(" ", termWidth-28) + cyan("│"))
-	fmt.Println(cyan("│") + strings.Repeat(" ", termWidth-2) + cyan("│"))
-	fmt.Println(cyan("│") + strings.Repeat(" ", termWidth-2) + cyan("│"))
-	fmt.Println(cyan("│") + strings.Repeat(" ", termWidth-2) + cyan("│"))
-	fmt.Println(cyan("│") + strings.Repeat(" ", termWidth-2) + cyan("│"))
-	fmt.Println(cyan("╰─") + strings.Repeat("─", termWidth-4) + cyan("─╯"))
-
-	// Move cursor up to the first data line
-	fmt.Print("\033[5A")
-
-	// Keep track of metrics for final summary
-	var speedSum float64
-	var speedCount int
-	var lastFrame int64
-
-	// Update progress bar every 100ms
-	ticker := time.NewTicker(100 * time.Millisecond)
-	defer ticker.Stop()
-
-	for {
-		select {
-		case update, ok := <-progressChan:
-			if !ok {
-				// Channel closed, conversion is complete
-				return
-			}
-
-			// Update the progress struct
-			progress.CurrentTime = update.CurrentTime
-			progress.TotalDuration = update.TotalDuration
-			progress.ProcessingRate = update.ProcessingRate
-			progress.CurrentSize = update.CurrentSize
-			progress.SizeUnit = update.SizeUnit
-			progress.Bitrate = update.Bitrate
-			progress.BitrateUnit = update.BitrateUnit
-
-			if update.FramesProcessed > 0 {
-				// Track first frame for estimation
-				if firstFrameCount == 0 {
-					firstFrameCount = update.FramesProcessed
-					firstFrameTime = time.Now()
-				}
-
-				progress.FramesProcessed = update.FramesProcessed
-				lastFrame = update.FramesProcessed
-			}
-
-			if update.Width > 0 {
-				progress.Width = update.Width
-
-				// Try to estimate total frames based on typical FPS and duration
-				// A rough estimate if we have dimensions and fps information
-				if estimatedTotalFrames == 0 && progress.FramesProcessed > 30 {
-					// Assuming a typical video, estimate total frames
-					estimatedTotalFrames = progress.FramesProcessed * 10 // Rough estimate
-				}
-			}
-
-			if update.Height > 0 {
-				progress.Height = update.Height
-			}
-
-			// Track for final summary
-			if update.ProcessingRate > 0 {
-				speedSum += update.ProcessingRate
-				speedCount++
-				progress.AvgProcessRate = speedSum / float64(speedCount)
-			}
-
-			// Track frame rate
-			if progress.FramesProcessed > lastFrameCount {
-				elapsed := time.Since(lastFrameTime).Seconds()
-				if elapsed > 0 {
-					fps := float64(progress.FramesProcessed-lastFrameCount) / elapsed
-					frameRates = append(frameRates, fps)
-					if len(frameRates) > 10 {
-						frameRates = frameRates[1:]
-					}
-				}
-				lastFrameCount = progress.FramesProcessed
-				lastFrameTime = time.Now()
-			}
-
-			// Estimate final frame count for summary
-			progress.Frames = int(lastFrame)
-
-		case <-ticker.C:
-			// Update the progress bar
-			clearLine()
-
-			// Calculate time elapsed
-			elapsedTime := time.Since(progress.StartTime).Seconds()
-
-			// Calculate average FPS
-			avgFPS := 0.0
-			if len(frameRates) > 0 {
-				sum := 0.0
-				for _, rate := range frameRates {
-					sum += rate
-				}
-				avgFPS = sum / float64(len(frameRates))
-			}
-
-			// Available width for progress bar
-			barWidth := termWidth - 6
-
-			// If no duration is available yet, still show useful info
-			if progress.TotalDuration <= 0 {
-				// Show a spinner in the progress bar - use \r to stay on the same line
-				fmt.Printf("\r\033[K %s Analyzing video...", green(spinner()))
-
-				// Calculate estimated time remaining if we have enough information
-				timeRemainingStr := "estimating..."
-				if progress.FramesProcessed > 30 && avgFPS > 0 && estimatedTotalFrames > 0 {
-					// Calculate a rough estimate of remaining time based on processing rate
-					frameProcessingRate := float64(progress.FramesProcessed-firstFrameCount) /
-						time.Since(firstFrameTime).Seconds()
-
-					if frameProcessingRate > 0 {
-						framesRemaining := float64(estimatedTotalFrames - progress.FramesProcessed)
-						if framesRemaining > 0 {
-							timeRemaining := framesRemaining / frameProcessingRate
-							timeRemainingStr = formatDuration(timeRemaining)
-						}
-					}
-				}
-
-				// Only show a simplified one-line progress to prevent multiple line output
-				if ticker.C != nil && progress.FramesProcessed > 0 {
-					fmt.Printf("\r\033[K %s | %s elapsed | %s | %d frames | %.1f fps",
-						blue("Analyzing"),
-						green(formatDuration(elapsedTime)),
-						yellow(timeRemainingStr),
-						progress.FramesProcessed,
-						avgFPS)
-				}
-
-				continue
-			}
-
-			// Calculate progress percentage
-			percentage := 0.0
-			if progress.TotalDuration > 0 {
-				percentage = (progress.CurrentTime / progress.TotalDuration) * 100
-				if percentage > 100 {
-					percentage = 100
-				}
-			}
-
-			// Calculate time remaining
-			remainingTime := 0.0
-			if progress.ProcessingRate > 0 && progress.CurrentTime > 0 {
-				remainingTime = (progress.TotalDuration - progress.CurrentTime) / progress.ProcessingRate
-				if remainingTime < 0 {
-					remainingTime = 0
-				}
-			}
-
-			// Calculate estimated final size
-			estimatedSize := 0.0
-			estimatedSizeLabel := ""
-			if progress.CurrentSize > 0 && progress.CurrentTime > 0 && progress.TotalDuration > 0 {
-				sizeMultiplier := 1.0
-				switch strings.ToLower(progress.SizeUnit) {
-				case "kb", "k":
-					sizeMultiplier = 1.0 / 1024.0 // Convert to MB
-					estimatedSizeLabel = "MB"
-				case "mb", "m":
-					sizeMultiplier = 1.0
-					estimatedSizeLabel = "MB"
-				case "gb", "g":
-					sizeMultiplier = 1024.0
-					estimatedSizeLabel = "MB"
-				case "b":
-					sizeMultiplier = 1.0 / (1024.0 * 1024.0) // Convert to MB
-					estimatedSizeLabel = "MB"
-				}
-
-				currentSizeMB := float64(progress.CurrentSize) * sizeMultiplier
-				if currentSizeMB > 0 && progress.CurrentTime > 0 {
-					estimatedSize = currentSizeMB * (progress.TotalDuration / progress.CurrentTime)
-				}
-			}
-
-			// Draw progress bar
-			progressLen := int((percentage / 100) * float64(barWidth))
-			if progressLen < 0 {
-				progressLen = 0
-			}
-			if progressLen > barWidth {
-				progressLen = barWidth
-			}
-
-			progressBar := green(strings.Repeat(progressChar, progressLen)) +
-				yellow(strings.Repeat(remainingChar, barWidth-progressLen))
-
-			// Line 1: Progress bar with percentage
-			progressLine := fmt.Sprintf(" %s [%s] %s",
-				blue("Progress:"),
-				progressBar,
-				yellow(fmt.Sprintf("%5.1f%%", percentage)))
-
-			// Print the progress bar and information
-			fmt.Println(progressLine)
-
-			// Line 2: Time information
-			timeLine := fmt.Sprintf(" %s %s of %s | %s remaining | %s elapsed",
-				blue("Time:"),
-				yellow(formatTime(progress.CurrentTime)),
-				green(formatTime(progress.TotalDuration)),
-				yellow(formatDuration(remainingTime)),
-				green(formatDuration(elapsedTime)))
-
-			fmt.Println(timeLine)
-
-			// Line 3: File size and conversion information
-			sizeLine := fmt.Sprintf(" %s %s | %s est. final size | %s processed",
-				blue("Size:"),
-				yellow(formatSize(progress.CurrentSize, progress.SizeUnit)),
-				green(fmt.Sprintf("%.2f %s", estimatedSize, estimatedSizeLabel)),
-				magenta(fmt.Sprintf("%d frames", progress.FramesProcessed)))
-
-			fmt.Println(sizeLine)
-
-			// Line 4: Technical information
-			statsLine := fmt.Sprintf(" %s %s | %s | %s",
-				blue("Stats:"),
-				yellow(fmt.Sprintf("%.1fx processing rate", progress.ProcessingRate)),
-				green(fmt.Sprintf("%.1f fps", avgFPS)),
-				formatDimensions(progress.Width, progress.Height))
-
-			fmt.Println(statsLine)
-
-			// Move cursor back up
-			fmt.Print("\033[4A")
-		}
-	}
 }
 
 func trackProgress(r io.ReadCloser) {
