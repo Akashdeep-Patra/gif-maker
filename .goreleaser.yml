@@ -1,3 +1,5 @@
+version: 2
+
 before:
   hooks:
     - go mod tidy
@@ -48,7 +50,7 @@ brews:
   - name: gif-maker
     homepage: https://github.com/Akashdeep-Patra/gif-maker
     description: "A production-grade CLI tool for converting video files to GIFs"
-    tap:
+    repository:
       owner: Akashdeep-Patra
       name: homebrew-tap
     commit_author:
